@@ -236,10 +236,68 @@ module TestHelpers
       end
     end
 
-    def script(script)
-      Dir.chdir(app_path) do
-        `#{Gem.ruby} #{app_path}/bin/rails #{script}`
+    def rails(*args, allow_failure: false, stderr: false)
+      args = args.flatten
+
+      command = "bin/rails #{Shellwords.join args}#{' 2>&1' unless stderr}"
+
+      output = nil
+
+      if !ENV["NO_FORK"] && Process.respond_to?(:fork)
+        out_read, out_write = IO.pipe
+        if stderr
+          err_read, err_write = IO.pipe
+        else
+          err_write = out_write
+        end
+
+        pid = fork do
+          out_read.close
+          err_read.close if err_read
+
+          $stdin.reopen(File::NULL, "r")
+          $stdout.reopen(out_write)
+          $stderr.reopen(err_write)
+
+          at_exit do
+            case $!
+            when SystemExit
+              exit! $!.status
+            when nil
+              exit! 0
+            else
+              err_write.puts "#{$!.class}: #{$!}"
+              exit! 1
+            end
+          end
+
+          Dir.chdir app_path unless Dir.pwd == app_path
+
+          ARGV.replace(args)
+          load "./bin/rails"
+
+          exit! 0
+        end
+
+        out_write.close
+
+        if err_read
+          err_write.close
+
+          $stderr.write err_read.read
+        end
+
+        output = out_read.read
+
+        Process.waitpid pid
+
+      else
+        output = `cd #{app_path}; #{command}`
       end
+
+      raise "rails command failed (#{$?.exitstatus}): #{command}\n#{output}" unless allow_failure || $?.success?
+
+      output
     end
 
     def add_to_top_of_config(str)
